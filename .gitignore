@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+
+# VS Code settings
+.vscode/
+
+# macOS
+.DS_Store
+
+# Reports
+reports/*.csv
+
+# Environment variables
+.env
