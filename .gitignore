@@ -17,3 +17,7 @@ reports/*.csv
 
 # Environment variables
 .env
+# Generated reports and logs
+reports/*.json
+reports/*.log
+.pytest_cache/

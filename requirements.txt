@@ -1,0 +1,6 @@
+pandas>=2.0
+numpy>=1.24
+requests>=2.31
+# MetaTrader 5 only provides a Windows package.
+MetaTrader5>=5.0.45; sys_platform == "win32"
+pytest>=8.0
