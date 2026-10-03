@@ -72,6 +72,11 @@ class Strategy(ABC):  # Base class shared by every strategy
             if isinstance(value, int) and not isinstance(value, bool)]
         return max([self.atr_period, *numbers]) * 3
 
+    @property
+    def history_needed(self) -> int:
+        """Candles the live trader should download for reliable signals."""
+        return max(1000, self.warmup * 2)
+
     def prepare(self, data: pd.DataFrame) -> pd.DataFrame:
         result = self.calculator.add_atr(
             data, period=self.atr_period, column_name="ATR")
@@ -87,8 +92,12 @@ class Strategy(ABC):  # Base class shared by every strategy
 
         return signal
 
+    def latest_signal(self, data: pd.DataFrame) -> int:
+        """Signal for the newest candle of prepared data (used by the live trader)."""
+        return int(self.signals(data).iloc[-1])
+
     def analyze(self, data: pd.DataFrame) -> StrategyAnalysis:
-        """Decision for the latest candle (used by the live trader)."""
+        """Decision for the latest candle, as a StrategyAnalysis."""
         if data.empty:
             raise ValueError("Cannot analyze an empty DataFrame.")
 
@@ -481,6 +490,15 @@ STRATEGY_CLASSES: dict[str, type[Strategy]] = {
         IndicatorStrategy,
     )
 }
+
+
+# The machine-learning strategy registers itself in STRATEGY_CLASSES when
+# imported. It needs scikit-learn (pip install scikit-learn).
+try:
+    import ml_strategy  # noqa: F401
+except ModuleNotFoundError as _error:  # pragma: no cover - only without scikit-learn
+    if _error.name != "sklearn":
+        raise
 
 
 def build_strategy(class_name: str, parameters: dict[str, Any]) -> Strategy:

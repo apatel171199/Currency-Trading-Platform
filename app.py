@@ -172,7 +172,7 @@ def print_selection(selection: Selection) -> None:
             continue
         print(f"  {title}: {m.trades:4d} trades | return {m.return_pct:7.2f}% | "
               f"win {m.win_rate_pct:5.1f}% | PF {m.profit_factor:5.2f} | "
-              f"max DD {m.max_drawdown_pct:5.1f}% | {m.expectancy_r:+.3f}R/trade")
+              f"max DD {m.max_drawdown_pct:5.1f}% | {m.expectancy_r:+.3f}R/trade | t {m.t_stat:4.1f}")
 
     if selection.note:
         print(f"  {selection.note}")
