@@ -29,6 +29,7 @@ from typing import Callable
 
 from broker import Broker, calculate_volume
 from optimizer import Selection
+from strategy import Strategy
 
 logger = logging.getLogger("trader")
 
@@ -55,6 +56,7 @@ class TradingHalted(RuntimeError):
 class _SymbolState:
     selection: Selection
     last_candle: object = None
+    strategy: Strategy | None = None
 
 
 @dataclass
@@ -146,8 +148,14 @@ class LiveTrader:
         if not selection.approved or selection.candidate is None:
             return
 
-        strategy = selection.candidate.build()
-        data = self.broker.candles(symbol, selection.timeframe, self.settings.candles)
+        # Keep one strategy object per symbol so models are not retrained
+        # on every candle (rebuilt only when the selection changes).
+        if state.strategy is None:
+            state.strategy = selection.candidate.build()
+        strategy = state.strategy
+
+        count = max(self.settings.candles, strategy.history_needed)
+        data = self.broker.candles(symbol, selection.timeframe, count)
 
         latest_time = data.index[-1]
         if latest_time == state.last_candle:
@@ -155,7 +163,7 @@ class LiveTrader:
         state.last_candle = latest_time
 
         prepared = strategy.prepare(data)
-        signal = int(strategy.signals(prepared).iloc[-1])
+        signal = strategy.latest_signal(prepared)
         atr = float(prepared["ATR"].iloc[-1])
 
         positions = self.broker.positions(symbol, self.settings.magic)
@@ -297,6 +305,7 @@ class LiveTrader:
                 continue
 
             state.selection = selection
+            state.strategy = None
             if selection.approved:
                 logger.info("%s: re-optimised -> %s", symbol, selection.candidate.label)
             else:

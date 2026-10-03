@@ -8,12 +8,16 @@ How it works
    setting is backtested on the in-sample part and ranked.
 3. Only the top candidates are then tested on the out-of-sample candles,
    which they were NOT tuned on. A candidate is approved only if it is
-   still profitable there.
+   still profitable there, by a margin that is unlikely to be luck
+   (t-statistic >= 2 over at least 30 trades).
 
 Step 3 matters: with hundreds of combinations, something will always look
 great on the data it was tuned on just by luck ("overfitting"). Checking
-on unseen data is the cheapest protection against that. If nothing passes,
-the optimizer says so — and the live trader will not trade that market.
+on unseen data is the cheapest protection against that — but only if the
+bar is high enough. A weak bar (e.g. "profit factor above 1.1") is passed
+by luck surprisingly often when several finalists each get a try. If
+nothing passes, the optimizer says so — and the live trader will not
+trade that market.
 """
 from __future__ import annotations
 
@@ -36,16 +40,21 @@ class OptimizerSettings:
 
     # Ignore results based on too few trades — they are mostly luck.
     min_trades_in_sample: int = 30
-    min_trades_out_of_sample: int = 10
+    min_trades_out_of_sample: int = 30
 
     # How many of the best in-sample candidates get the out-of-sample test.
-    finalists: int = 10
+    # Every extra finalist is another chance for luck to pass the test, so
+    # keep this small.
+    finalists: int = 5
 
     stop_atr_multiples: tuple[float, ...] = (1.5, 2.0)
     target_atr_multiples: tuple[float, ...] = (1.5, 3.0)
 
     # Out-of-sample requirements for a strategy to be approved.
     min_out_of_sample_profit_factor: float = 1.1
+    # t-statistic of the average R on unseen data. About 2 means "less
+    # than a ~2.5% chance this profit is pure luck" for a single test.
+    min_out_of_sample_t_stat: float = 2.0
     max_out_of_sample_drawdown_pct: float = 25.0
 
 
@@ -58,6 +67,7 @@ class Metrics:
     max_drawdown_pct: float
     expectancy_r: float
     sqn: float
+    t_stat: float = 0.0
 
     @classmethod
     def from_result(cls, result: BacktestResult) -> "Metrics":
@@ -69,6 +79,7 @@ class Metrics:
             max_drawdown_pct=round(result.maximum_drawdown_pct, 3),
             expectancy_r=round(result.expectancy_r, 4),
             sqn=round(system_quality_number(result), 4),
+            t_stat=round(t_statistic(result), 4),
         )
 
 
@@ -128,6 +139,23 @@ class Selection:
             if data.get(key):
                 data[key] = Metrics(**data[key])
         return cls(**data)
+
+
+def t_statistic(result: BacktestResult) -> float:
+    """mean(R) / std(R) * sqrt(trades): how sure we can be the average R
+    is above zero. Unlike SQN the trade count is not capped."""
+    r_values = [trade.r_multiple for trade in result.trades]
+
+    if len(r_values) < 2:
+        return 0.0
+
+    mean = sum(r_values) / len(r_values)
+    variance = sum((r - mean) ** 2 for r in r_values) / (len(r_values) - 1)
+
+    if variance == 0:
+        return 0.0
+
+    return mean / math.sqrt(variance) * math.sqrt(len(r_values))
 
 
 def system_quality_number(result: BacktestResult) -> float:
@@ -292,6 +320,10 @@ class StrategyOptimizer:
             return False, f"only {metrics.trades} out-of-sample trades"
         if metrics.expectancy_r <= 0:
             return False, "lost money on unseen data"
+        if metrics.t_stat < self.settings.min_out_of_sample_t_stat:
+            return False, (
+                f"profit on unseen data could be luck (t-stat {metrics.t_stat:.2f} < "
+                f"{self.settings.min_out_of_sample_t_stat})")
         if metrics.profit_factor < self.settings.min_out_of_sample_profit_factor:
             return False, f"out-of-sample profit factor {metrics.profit_factor:.2f} too low"
         if metrics.max_drawdown_pct > self.settings.max_out_of_sample_drawdown_pct:
