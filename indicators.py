@@ -118,6 +118,62 @@ class IndicatorCalculator: #Calculates technical indicators from market price da
 
         return result
 
+    def add_macd(
+        self,
+        data: pd.DataFrame,
+        fast_period: int = 12,
+        slow_period: int = 26,
+        signal_period: int = 9,
+    ) -> pd.DataFrame:
+        self._validate_data(data)
+
+        for period in (fast_period, slow_period, signal_period):
+            self._validate_period(period)
+
+        if fast_period >= slow_period:
+            raise ValueError("MACD fast period must be shorter than the slow period.")
+
+        result = data.copy()
+        suffix = f"{fast_period}_{slow_period}_{signal_period}"
+
+        fast_ema = result["Close"].ewm(span=fast_period, adjust=False).mean()
+        slow_ema = result["Close"].ewm(span=slow_period, adjust=False).mean()
+
+        macd_line = fast_ema - slow_ema
+        signal_line = macd_line.ewm(span=signal_period, adjust=False).mean()
+
+        # The first slow_period candles do not have enough history yet.
+        macd_line.iloc[: slow_period - 1] = np.nan
+        signal_line.iloc[: slow_period + signal_period - 2] = np.nan
+
+        result[f"MACD_{suffix}"] = macd_line
+        result[f"MACD_SIGNAL_{suffix}"] = signal_line
+        result[f"MACD_HIST_{suffix}"] = macd_line - signal_line
+
+        return result
+
+    def add_donchian_channel(
+        self,
+        data: pd.DataFrame,
+        period: int = 20,
+    ) -> pd.DataFrame:
+        """Highest high / lowest low of the PREVIOUS `period` candles.
+
+        The current candle is excluded so that "close above the channel"
+        is a real breakout and not compared against itself.
+        """
+        self._validate_data(data)
+        self._validate_period(period)
+
+        result = data.copy()
+
+        result[f"DC_UPPER_{period}"] = (
+            result["High"].rolling(window=period).max().shift(1))
+        result[f"DC_LOWER_{period}"] = (
+            result["Low"].rolling(window=period).min().shift(1))
+
+        return result
+
     def _validate_data(self, data: pd.DataFrame) -> None:
         if data.empty:
             raise ValueError("Cannot calculate indicators on an empty DataFrame.")
