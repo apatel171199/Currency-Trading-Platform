@@ -72,3 +72,5 @@ I'm not a Computer Science major, but I wanted to challenge myself by building s
 This project gives me a chance to practice programming while also learning about quantitative trading and software design.
 
 I'm treating it as a long-term learning project, so I'll keep improving it as my skills grow.
+
+I recently started using Claude Code to improve the quality of my code and write more complex programs.
