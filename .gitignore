@@ -21,3 +21,7 @@ reports/*.csv
 reports/*.json
 reports/*.log
 .pytest_cache/
+
+# Downloaded price history and evolved networks
+data/
+reports/neat/

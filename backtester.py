@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -7,6 +8,14 @@ import pandas as pd
 
 from decision import Decision
 from strategy import BUY, SELL, Strategy
+
+
+PriceArrays = tuple  # (opens, highs, lows, closes, atrs) as float numpy arrays
+
+
+def price_arrays(data: pd.DataFrame) -> PriceArrays:
+    return tuple(data[column].to_numpy(dtype=float)
+                 for column in ("Open", "High", "Low", "Close", "ATR"))
 
 
 def pip_size_for(symbol: str) -> float:
@@ -190,22 +199,66 @@ class Backtester:  # Simulates one risk-managed position at a time
 
     def run_signals(self, data: pd.DataFrame, signals: np.ndarray) -> BacktestResult:
         """Fast path used by the optimizer: signals are pre-computed."""
-        opens = data["Open"].to_numpy(dtype=float)
-        highs = data["High"].to_numpy(dtype=float)
-        lows = data["Low"].to_numpy(dtype=float)
-        closes = data["Close"].to_numpy(dtype=float)
-        atrs = data["ATR"].to_numpy(dtype=float)
-        times = data.index
-
         settings = self.settings
-        half_cost = (settings.spread_pips + settings.commission_pips) * settings.pip_size / 2
+        raw_trades = self.simulate(price_arrays(data), signals)
 
         balance = settings.starting_balance
         trades: list[Trade] = []
         equity_curve = [balance]
 
-        candle_count = len(data)
-        signal_positions = np.flatnonzero(signals[:-1])  # last candle has no next open
+        entry_times = data.index.take([t[1] for t in raw_trades])
+        exit_times = data.index.take([t[2] for t in raw_trades])
+
+        for number, raw in enumerate(raw_trades):
+            if balance <= 0:
+                break  # account is empty: no more trades
+
+            direction, _, _, entry_price, exit_price, stop_price, target_price, r_multiple, reason = raw
+
+            profit_loss = r_multiple * balance * settings.risk_per_trade
+            balance_before = balance
+            balance = max(balance + profit_loss, 0.0)
+
+            trades.append(
+                Trade(
+                    direction=Decision.BUY if direction == BUY else Decision.SELL,
+                    entry_time=entry_times[number],
+                    exit_time=exit_times[number],
+                    entry_price=entry_price,
+                    exit_price=exit_price,
+                    stop_price=stop_price,
+                    target_price=target_price,
+                    r_multiple=r_multiple,
+                    profit_loss=profit_loss,
+                    return_pct=profit_loss / balance_before * 100,
+                    exit_reason=reason,
+                    balance_after=balance,
+                )
+            )
+            equity_curve.append(balance)
+
+        return BacktestResult(
+            starting_balance=settings.starting_balance,
+            ending_balance=balance,
+            trades=tuple(trades),
+            equity_curve=tuple(equity_curve),
+        )
+
+    def r_multiples(self, arrays: PriceArrays, signals: np.ndarray) -> np.ndarray:
+        """Only the R of each trade - the quickest possible backtest (used by evolution)."""
+        return np.array([raw[7] for raw in self.simulate(arrays, signals)], dtype=float)
+
+    def simulate(self, arrays: PriceArrays, signals: np.ndarray) -> list[tuple]:
+        """The trading rules. Returns one tuple per trade:
+        (direction, entry_index, exit_index, entry_price, exit_price,
+         stop_price, target_price, r_multiple, exit_reason)."""
+        opens, highs, lows, closes, atrs = arrays
+        signals = np.asarray(signals)
+        settings = self.settings
+        half_cost = (settings.spread_pips + settings.commission_pips) * settings.pip_size / 2
+
+        trades: list[tuple] = []
+        signal_positions = np.flatnonzero(signals[:-1]).tolist()  # last candle has no next open
 
         # Next candle index on which a new signal may be acted upon.
         index = 0
@@ -223,18 +276,18 @@ class Backtester:  # Simulates one risk-managed position at a time
                 if pointer >= len(signal_positions):
                     break
 
-                signal_index = int(signal_positions[pointer])
+                signal_index = signal_positions[pointer]
                 pointer += 1
 
             direction = int(signals[signal_index])
-            atr = atrs[signal_index]
+            atr = float(atrs[signal_index])
 
-            if not np.isfinite(atr) or atr <= 0 or balance <= 0:
+            if not math.isfinite(atr) or atr <= 0:
                 index = signal_index + 1
                 continue
 
             entry_index = signal_index + 1
-            entry_price = opens[entry_index] + direction * half_cost
+            entry_price = float(opens[entry_index]) + direction * half_cost
 
             stop_distance = atr * settings.stop_atr_multiple
             stop_price = entry_price - direction * stop_distance
@@ -248,28 +301,8 @@ class Backtester:  # Simulates one risk-managed position at a time
             exit_price = raw_exit_price - direction * half_cost
             r_multiple = direction * (exit_price - entry_price) / stop_distance
 
-            risk_amount = balance * settings.risk_per_trade
-            profit_loss = r_multiple * risk_amount
-            balance_before = balance
-            balance = max(balance + profit_loss, 0.0)
-
-            trades.append(
-                Trade(
-                    direction=Decision.BUY if direction == BUY else Decision.SELL,
-                    entry_time=times[entry_index],
-                    exit_time=times[exit_index],
-                    entry_price=entry_price,
-                    exit_price=exit_price,
-                    stop_price=stop_price,
-                    target_price=target_price,
-                    r_multiple=r_multiple,
-                    profit_loss=profit_loss,
-                    return_pct=profit_loss / balance_before * 100,
-                    exit_reason=reason,
-                    balance_after=balance,
-                )
-            )
-            equity_curve.append(balance)
+            trades.append((direction, entry_index, exit_index, entry_price, exit_price,
+                           stop_price, target_price, r_multiple, reason))
 
             if reason == "OPPOSITE_SIGNAL":
                 # The opposite signal was on exit_index - 1; it opens the
@@ -280,12 +313,7 @@ class Backtester:  # Simulates one risk-managed position at a time
                 # on at the next open, after this trade is already closed.
                 index = exit_index
 
-        return BacktestResult(
-            starting_balance=settings.starting_balance,
-            ending_balance=balance,
-            trades=tuple(trades),
-            equity_curve=tuple(equity_curve),
-        )
+        return trades
 
     @staticmethod
     def _find_exit(
@@ -300,28 +328,46 @@ class Backtester:  # Simulates one risk-managed position at a time
         target_price: float,
     ) -> tuple[int, float, str]:
         last = len(opens) - 1
+        start = entry_index
+        chunk = 16
 
-        for index in range(entry_index, last + 1):
+        # Look ahead in growing chunks with numpy instead of one candle at a time.
+        while start <= last:
+            end = min(start + chunk, last + 1)
+
             if direction == BUY:
-                stop_hit = lows[index] <= stop_price
-                target_hit = highs[index] >= target_price
+                stop_hit = lows[start:end] <= stop_price
+                target_hit = highs[start:end] >= target_price
             else:
-                stop_hit = highs[index] >= stop_price
-                target_hit = lows[index] <= target_price
+                stop_hit = highs[start:end] >= stop_price
+                target_hit = lows[start:end] <= target_price
 
-            if stop_hit:
-                # A gap through the stop fills at the (worse) open price.
-                gap_price = opens[index]
-                gapped = (gap_price < stop_price) if direction == BUY else (gap_price > stop_price)
-                return index, gap_price if gapped else stop_price, "STOP_LOSS"
+            opposite = signals[start:end] == -direction
+            if end - 1 == last:
+                opposite[-1] = False  # no next open to exit on
 
-            if target_hit:
-                return index, target_price, "TAKE_PROFIT"
+            events = stop_hit | target_hit | opposite
 
-            if index < last and signals[index] == -direction:
-                return index + 1, opens[index + 1], "OPPOSITE_SIGNAL"
+            if events.any():
+                offset = int(np.argmax(events))
+                index = start + offset
 
-        return last, closes[last], "END_OF_DATA"
+                if stop_hit[offset]:
+                    # Both touched in one candle? Assume the stop came first.
+                    # A gap through the stop fills at the (worse) open price.
+                    gap_price = float(opens[index])
+                    gapped = (gap_price < stop_price) if direction == BUY else (gap_price > stop_price)
+                    return index, gap_price if gapped else stop_price, "STOP_LOSS"
+
+                if target_hit[offset]:
+                    return index, target_price, "TAKE_PROFIT"
+
+                return index + 1, float(opens[index + 1]), "OPPOSITE_SIGNAL"
+
+            start = end
+            chunk *= 2
+
+        return last, float(closes[last]), "END_OF_DATA"
 
     def _validate_data(self, data: pd.DataFrame) -> None:
         required_columns = {"Open", "High", "Low", "Close"}

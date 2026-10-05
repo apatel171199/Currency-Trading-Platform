@@ -496,6 +496,7 @@ STRATEGY_CLASSES: dict[str, type[Strategy]] = {
 # imported. It needs scikit-learn (pip install scikit-learn).
 try:
     import ml_strategy  # noqa: F401
+    import neat_strategy  # noqa: F401
 except ModuleNotFoundError as _error:  # pragma: no cover - only without scikit-learn
     if _error.name != "sklearn":
         raise

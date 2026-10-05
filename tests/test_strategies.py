@@ -18,7 +18,10 @@ def test_signals_do_not_look_ahead(cls, candles):
         pd.testing.assert_series_equal(full.iloc[:cut], past_only, check_names=False)
 
 
-@pytest.mark.parametrize("cls", STRATEGY_CLASSES.values(), ids=list(STRATEGY_CLASSES))
+GRID_STRATEGIES = {name: cls for name, cls in STRATEGY_CLASSES.items() if cls.parameter_combinations()}
+
+
+@pytest.mark.parametrize("cls", GRID_STRATEGIES.values(), ids=list(GRID_STRATEGIES))
 def test_strategies_produce_both_directions(cls, candles):
     strategy = cls()
     signals = strategy.signals(strategy.prepare(candles))

@@ -3,6 +3,8 @@
     python app.py optimize --source mt5 --symbols EURUSD GBPUSD USDJPY --timeframe H1
     python app.py trade    --broker mt5 --symbols EURUSD GBPUSD USDJPY
     python app.py scan     --source twelvedata --symbols EURUSD
+    python app.py download --symbols EURUSD GBPUSD USDJPY --years 10
+    python app.py evolve   --symbols EURUSD GBPUSD USDJPY --years 10
 
 Run ``python app.py <command> --help`` for every option.
 """
@@ -91,9 +93,12 @@ class DataLoader:  # Gets candles from MT5, Twelve Data or CSV files
                 MarketRequest(symbol=symbol, interval=timeframe, output_size=min(count, 5000)))
 
         if self.source == "csv":
-            if symbol not in self.csv_files:
-                raise ValueError(f"No CSV given for {symbol}. Use --csv {symbol}=path/to/file.csv")
-            return load_csv(self.csv_files[symbol]).tail(count)
+            path = self.csv_files.get(symbol) or Path("data") / f"{symbol}_{timeframe}.csv"
+            if not Path(path).exists():
+                raise ValueError(
+                    f"No CSV for {symbol}. Run 'python app.py download --symbols {symbol}' "
+                    f"or pass --csv {symbol}=path/to/file.csv")
+            return load_csv(str(path)).tail(count)
 
         raise ValueError(f"Unknown data source '{self.source}'.")
 
@@ -305,6 +310,97 @@ def command_scan(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- download & evolve -------------------------------------------------------
+
+BARS_PER_YEAR = {"M1": 374_400, "M5": 74_880, "M15": 24_960, "M30": 12_480,
+                 "H1": 6_240, "H4": 1_560, "D1": 260}
+
+
+def command_download(args: argparse.Namespace) -> int:
+    from data_download import download_to_csv
+
+    failed = 0
+    for symbol in args.symbols:
+        try:
+            download_to_csv(symbol, args.years)
+        except RuntimeError as error:
+            print(f"{symbol}: {error}")
+            failed += 1
+    return 1 if failed else 0
+
+
+def command_evolve(args: argparse.Namespace) -> int:
+    from evolution import Evolution, EvolutionSettings
+
+    timeframe = normalize_timeframe(args.timeframe)
+    loader = DataLoader(args.source, parse_csv_args(args.csv))
+    settings = EvolutionSettings(
+        population=args.population,
+        generations=args.generations,
+        patience=args.patience,
+        workers=args.workers,
+        seed=args.seed,
+    )
+    evolution = Evolution(settings)
+    datasets = []
+
+    try:
+        for symbol in args.symbols:
+            bars = int(args.years * BARS_PER_YEAR[timeframe])
+            candles = loader.candles(symbol, timeframe, bars)
+            start = candles.index[-1] - pd.DateOffset(days=int(args.years * 365.25))
+            candles = candles[candles.index >= start]
+            spread = args.spread if args.spread is not None else loader.spread_pips(symbol, candles, 1.5)
+
+            data = evolution.prepare(symbol, candles, spread)
+            datasets.append(data)
+            years = data.prices.index
+            print(f"{symbol}: {len(candles):,} candles {years[0]:%Y-%m-%d} -> {years[-1]:%Y-%m-%d} | "
+                  f"train to {years[data.train_end]:%Y-%m-%d}, validation to "
+                  f"{years[data.validation_end]:%Y-%m-%d}, test after that")
+    except (RuntimeError, ValueError) as error:
+        print(f"Cannot evolve: {error}")
+        return 1
+    finally:
+        loader.close()
+
+    print(f"\nEvolving {settings.population} networks for up to {settings.generations} "
+          f"generations on {len(datasets)} symbol(s) using {settings.workers} CPU core(s)...")
+    result = evolution.run(datasets, output_dir=REPORTS / "neat", timeframe=timeframe)
+
+    history = pd.DataFrame([vars(report) for report in result.history])
+    history_file = result.network_file.with_name(result.network_file.stem + "-history.csv")
+    history.to_csv(history_file, index=False)
+
+    print("\n" + "=" * 72)
+    print("FINAL EXAM ON THE UNTOUCHED TEST YEARS")
+    print("=" * 72)
+    for selection in result.selections.values():
+        print_selection(selection)
+
+    existing = load_selections(SELECTIONS_FILE) if SELECTIONS_FILE.exists() else {}
+    to_save = {}
+    for symbol, selection in result.selections.items():
+        current = existing.get(symbol)
+        if current is None:
+            to_save[symbol] = selection
+        elif selection.approved and (
+                not current.approved
+                or selection.out_of_sample.t_stat > current.out_of_sample.t_stat):
+            to_save[symbol] = selection
+        elif selection.approved:
+            print(f"{symbol}: keeping {current.candidate.label}, which tested stronger.")
+
+    if to_save:
+        save_selections(to_save, SELECTIONS_FILE)
+
+    print(f"\nNetwork saved to {result.network_file}")
+    print(f"Generation history: {history_file}")
+    approved = [s for s, sel in result.selections.items() if sel.approved]
+    print(f"Approved for trading: {', '.join(approved) if approved else 'none'}")
+    return 0
+
+
 # --- argument parsing --------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
@@ -349,6 +445,30 @@ def build_parser() -> argparse.ArgumentParser:
     scan = commands.add_parser("scan", help="explain the current indicator score")
     add_data_arguments(scan, default_bars=500)
     scan.set_defaults(func=command_scan)
+
+    download = commands.add_parser("download", help="download years of hourly prices (Dukascopy)")
+    download.add_argument("--symbols", nargs="+", default=["EURUSD", "GBPUSD", "USDJPY"],
+                          type=str.upper)
+    download.add_argument("--years", type=float, default=10)
+    download.set_defaults(func=command_download)
+
+    evolve = commands.add_parser("evolve", help="evolve a neural-network strategy with NEAT")
+    evolve.add_argument("--source", choices=["csv", "mt5", "twelvedata"], default="csv",
+                        help="default: data/SYMBOL_H1.csv made by the download command")
+    evolve.add_argument("--symbols", nargs="+", default=["EURUSD", "GBPUSD", "USDJPY"],
+                        type=str.upper)
+    evolve.add_argument("--timeframe", default="H1")
+    evolve.add_argument("--years", type=float, default=10)
+    evolve.add_argument("--population", type=int, default=100)
+    evolve.add_argument("--generations", type=int, default=150)
+    evolve.add_argument("--patience", type=int, default=30,
+                        help="stop after N generations without a better champion")
+    evolve.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1),
+                        help="CPU cores to use")
+    evolve.add_argument("--spread", type=float, default=None, help="pips (default 1.5)")
+    evolve.add_argument("--seed", type=int, default=1)
+    evolve.add_argument("--csv", nargs="*", metavar="SYMBOL=PATH")
+    evolve.set_defaults(func=command_evolve)
 
     return parser
 

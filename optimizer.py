@@ -315,6 +315,10 @@ class StrategyOptimizer:
         # The strategy object is not needed for run_signals().
         return Backtester(strategy=None, settings=settings)
 
+    def judge(self, metrics: Metrics) -> tuple[bool, str]:
+        """Approves out-of-sample results that are unlikely to be luck."""
+        return self._judge(metrics)
+
     def _judge(self, metrics: Metrics) -> tuple[bool, str]:
         if metrics.trades < self.settings.min_trades_out_of_sample:
             return False, f"only {metrics.trades} out-of-sample trades"
